@@ -4,127 +4,22 @@ import java.nio.file.StandardCopyOption.*
 import java.security.MessageDigest
 import kotlin.math.*
 
-object MessageDigestAlgorithm {
-    const val MD2 = "MD2"
-    const val MD5 = "MD5"
-    const val SHA_1 = "SHA-1"
-    const val SHA_224 = "SHA-224"
-    const val SHA_256 = "SHA-256"
-    const val SHA_384 = "SHA-384"
-    const val SHA_512 = "SHA-512"
-    const val SHA_512_224 = "SHA-512/224"
-    const val SHA_512_256 = "SHA-512/256"
-    const val SHA3_224 = "SHA3-224"
-    const val SHA3_256 = "SHA3-256"
-    const val SHA3_384 = "SHA3-384"
-    const val SHA3_512 = "SHA3-512"
-}
+const val COPY_AND_COMPARE_PROGRESS_NOTIFY_SKIP_COUNT = 5000 // Each one is one kB (1024 bytes)
+const val SCAN_PROGRESS_NOTIFY_SKIP_COUNT = 600 // Each one is one file
 
-object StringUtils {
-
-    /** Used to build output as Hex */
-    private val DIGITS_LOWER =
-        charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f')
-
-    /** Used to build output as Hex */
-    private val DIGITS_UPPER =
-        charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F')
-
-    /**
-     * Converts an array of bytes into an array of characters representing the hexadecimal values of
-     * each byte in order. The returned array will be double the length of the passed array, as it
-     * takes two characters to represent any given byte.
-     *
-     * @param data a byte[] to convert to Hex characters
-     * @param toLowerCase `true` converts to lowercase, `false` to uppercase
-     * @return A char[] containing hexadecimal characters in the selected case
-     */
-    fun encodeHex(data: ByteArray, toLowerCase: Boolean): CharArray {
-        return encodeHex(data, if (toLowerCase) DIGITS_LOWER else DIGITS_UPPER)
-    }
-
-    /**
-     * Converts an array of bytes into an array of characters representing the hexadecimal values of
-     * each byte in order. The returned array will be double the length of the passed array, as it
-     * takes two characters to represent any given byte.
-     *
-     * @param data a byte[] to convert to Hex characters
-     * @param toDigits the output alphabet (must contain at least 16 chars)
-     * @return A char[] containing the appropriate characters from the alphabet For best results,
-     *   this should be either upper- or lower-case hex.
-     */
-    fun encodeHex(data: ByteArray, toDigits: CharArray): CharArray {
-        val l = data.size
-        val out = CharArray(l shl 1)
-        // two characters form the hex value.
-        var i = 0
-        var j = 0
-        while (i < l) {
-            out[j++] = toDigits[0xF0 and data[i].toInt() ushr 4]
-            out[j++] = toDigits[0x0F and data[i].toInt()]
-            i++
-        }
-        return out
-    }
-}
-
-object HashUtils {
-
-    const val STREAM_BUFFER_LENGTH = 1024
-
-    fun getCheckSumFromFile(digest: MessageDigest, filePath: String): String {
-        val file = File(filePath)
-        return getCheckSumFromFile(digest, file)
-    }
-
-    fun getCheckSumFromFile(digest: MessageDigest, file: File): String {
-        val fis = FileInputStream(file)
-        val byteArray = updateDigest(digest, fis).digest()
-        fis.close()
-        val hexCode = StringUtils.encodeHex(byteArray, true)
-        return String(hexCode)
-    }
-
-    fun getCheckSumFromFile(digest: String, file: File): String {
-        val fis = FileInputStream(file)
-        val byteArray = updateDigest(MessageDigest.getInstance(digest), fis).digest()
-        fis.close()
-        val hexCode = StringUtils.encodeHex(byteArray, true)
-        return String(hexCode)
-    }
-
-    /**
-     * Reads through an InputStream and updates the digest for the data
-     *
-     * @param digest The MessageDigest to use (e.g. MD5)
-     * @param data Data to digest
-     * @return the digest
-     */
-    private fun updateDigest(digest: MessageDigest, data: InputStream): MessageDigest {
-        val buffer = ByteArray(STREAM_BUFFER_LENGTH)
-        var read = data.read(buffer, 0, STREAM_BUFFER_LENGTH)
-        while (read > -1) {
-            digest.update(buffer, 0, read)
-            read = data.read(buffer, 0, STREAM_BUFFER_LENGTH)
-        }
-        return digest
-    }
-}
-
-fun File.getAllSubFiles(): List<File> {
+fun File.getAllSubFiles(onFileScanned : () -> Unit = {}): List<File> {
     val files = mutableListOf<File>()
     listFiles().forEach {
         if (it.isFile()) {
             files.add(it)
+            onFileScanned()
         } else if (it.isDirectory()) {
-            files.addAll(it.getAllSubFiles())
+            files.addAll(it.getAllSubFiles(onFileScanned))
         }
     }
     return files.toList()
 }
 
-fun File.calculateSHA256(): String =
-    HashUtils.getCheckSumFromFile(MessageDigestAlgorithm.SHA_256, this)
 
 fun File.rename(newName: String): Boolean {
     
@@ -144,13 +39,54 @@ fun copyFile(from : String, to : String, onProgress : (progress : Float, writed 
     var counter = 0L
     var r : Int
     var b = ByteArray(1024)
+    var progressNotifyDelayer = 0L
     while( fin.read(b).apply {r = this} != -1) {
         counter += r
-        onProgress(counter.toFloat() / length, counter)
+        progressNotifyDelayer += 1
+        if(progressNotifyDelayer % COPY_AND_COMPARE_PROGRESS_NOTIFY_SKIP_COUNT == 0L) {
+            onProgress(counter.toFloat() / length, counter)
+        }
         fout.write(b, 0, r)
     }
     fin.close()
     fout.close()
+    return true
+}
+
+private fun isEqual(firstFile: Path, secondFile: Path, onProgress : (progress : Float) -> Unit = {_ -> Unit}): Boolean {
+    if (Files.size(firstFile) != Files.size(secondFile)) {
+        return false
+    }
+    val file1 = firstFile.toFile()
+	val file2 = secondFile.toFile()
+
+    val length = file1.length()
+
+    var fin1 = FileInputStream(file1)
+    var fin2 = FileInputStream(file2)
+
+    var b1 = ByteArray(1024)
+    var b2 = ByteArray(1024)
+
+    var r : Int
+    var counter = 0L
+
+    var progressNotifyDelayer = 0L
+    while( fin1.read(b1).apply {r = this} != -1 && fin2.read(b2) != -1 ) {
+        if(b1 contentEquals b2) {
+            counter += r
+            progressNotifyDelayer += 1
+            if(progressNotifyDelayer % COPY_AND_COMPARE_PROGRESS_NOTIFY_SKIP_COUNT == 0L) {
+                onProgress(counter.toFloat() / length)
+            }
+        } else {
+            return false
+        }
+    }
+
+    fin1.close()    
+    fin2.close()    
+
     return true
 }
 
@@ -164,15 +100,36 @@ fun main(args: Array<String>) {
         throw IllegalArgumentException("Paths most be directory")
     }
 
+    var compareStateLenght = 0
+
     println("Scan source folder for files ...")
+    var forPrint : String
+    var scannedFilesCount = 0
     val allFiles1 =
-        parent1.getAllSubFiles()
+        parent1.getAllSubFiles({
+            scannedFilesCount += 1
+            if (scannedFilesCount % SCAN_PROGRESS_NOTIFY_SKIP_COUNT == 0) {
+                forPrint = "\rScanning : \u001B[0;31m$scannedFilesCount\u001B[0m scanned"
+                if (compareStateLenght < forPrint.length) {
+                    print(forPrint)
+                } else {
+                    print(forPrint + " ".repeat(compareStateLenght - forPrint.length))
+                }
+                compareStateLenght = forPrint.length   
+            }
+        })
     val allFiles1Size = allFiles1.size
-    println("Scanning completed with \u001B[0;31m$allFiles1Size\u001B[0m files")
+
+    forPrint = "\rScanning completed with \u001B[0;31m$allFiles1Size\u001B[0m files\n"
+    if (compareStateLenght < forPrint.length) {
+        print(forPrint)
+    } else {
+        print(forPrint + " ".repeat(compareStateLenght - forPrint.length))
+    }
+    compareStateLenght = forPrint.length   
 
     var resultEquals = ""
     var resultActions = ""
-    var compareStateLenght = 0
     val renameQueue = mutableSetOf<Pair<File, File>>()
     val copyQueue = mutableSetOf<Pair<File, File>>()
 
@@ -184,7 +141,7 @@ fun main(args: Array<String>) {
         val sameInFolder2Path = path2.resolve(path1.relativize(file1.toPath()))
         val file2 = sameInFolder2Path.toFile()
 
-        val forPrint = "\rCompare : \u001B[0;31m${((fileIndex + 1).toFloat() * 100 / allFiles1Size).roundToInt()}%\u001B[0m | current : ${"%,d".format(file1.length())} bytes"
+        forPrint = "\rCompare : \u001B[0;31m${((fileIndex + 1).toFloat() * 100 / allFiles1Size).roundToInt()}%\u001B[0m | current : ${"%,d".format(file1.length())} bytes"
         if (compareStateLenght < forPrint.length) {
             print(forPrint)
         } else {
@@ -193,7 +150,15 @@ fun main(args: Array<String>) {
         compareStateLenght = forPrint.length
 
         if(file2.exists()) {
-            if(file1.calculateSHA256() == file2.calculateSHA256()) {
+            if(isEqual(file1.toPath(), file2.toPath(), { currentCompareProgress ->
+                forPrint = "\rCompare : \u001B[0;31m${((fileIndex + 1).toFloat() * 100 / allFiles1Size).roundToInt()}%\u001B[0m | current \u001B[0;31m${(currentCompareProgress*100).roundToInt()}%\u001B[0m : ${"%,d".format(file1.length())} bytes"
+                if (compareStateLenght < forPrint.length) {
+                    print(forPrint)
+                } else {
+                    print(forPrint + " ".repeat(compareStateLenght - forPrint.length))
+                }
+                compareStateLenght = forPrint.length
+            })) {
                 resultEquals += "equels : \u001B[0;31m." + file1PathStr + "\u001B[0m\n"
             } else {
                 renameQueue.add(file1 to file2)
@@ -224,9 +189,9 @@ fun main(args: Array<String>) {
     var writedBefore = 0L
     var copyStateLenght = 0
 
-    val onProgressUpdated : (progress : Float, writed : Long, fileSizeFormatted : String) -> Unit = { progress, writed, fileSize ->
+    val onCopyProgressUpdated : (progress : Float, writed : Long, fileSizeFormatted : String) -> Unit = { progress, writed, fileSize ->
         val totalPrecent = (((writed + writedBefore) / totalSize.toFloat()) * 100).roundToInt()
-        val forPrint = "\rTotal : \u001B[0;31m$totalPrecent%\u001B[0m | current : ${(progress * 100).roundToInt()}% from $fileSize bytes"
+        forPrint = "\rTotal : \u001B[0;31m$totalPrecent%\u001B[0m | current : ${(progress * 100).roundToInt()}% from $fileSize bytes"
         if (copyStateLenght < forPrint.length) {
             print(forPrint)
         } else {
@@ -256,7 +221,7 @@ fun main(args: Array<String>) {
             val from = file1.toPath() // \lozi\mozi\
             val to = file2.toPath().resolveSibling("(Version 1) " + file2.name)
             copyFile(from.toAbsolutePath().toString(), to.toAbsolutePath().toString()) { progress, writed ->
-                onProgressUpdated(progress, writed, fileSize)
+                onCopyProgressUpdated(progress, writed, fileSize)
             }
             file1.rename("(Version 1) " + file1.name)
         } catch (e: Exception) {
@@ -280,7 +245,7 @@ fun main(args: Array<String>) {
         try {
             destinationFile.parentFile.mkdirs()
             copyFile(sourceFile.path, destinationFile.path) { progress, writed ->
-                onProgressUpdated(progress, writed, fileSize)
+                onCopyProgressUpdated(progress, writed, fileSize)
             }
         } catch (e: Exception) {
             println(
@@ -295,7 +260,7 @@ fun main(args: Array<String>) {
         writedBefore += fileLength
     }
 
-    val forPrint = "\rActions completed !"
+    forPrint = "\rActions completed !"
     if (copyStateLenght < forPrint.length) {
         print(forPrint)
     } else {
